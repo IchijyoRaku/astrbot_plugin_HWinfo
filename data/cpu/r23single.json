@@ -1,4 +1,5 @@
 {
+  "version": "0.1",
   "source": "https://www.topcpu.net/cpu-r/cinebench-r23-single-core",
   "benchmark": "Cinebench R23 Single Core",
   "count": 708,
