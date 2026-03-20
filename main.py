@@ -220,7 +220,7 @@ class HWInfoPlugin(Star):
 
         user_id = str(event.get_sender_id())
         self.pending_choices[user_id] = {"category": category, "items": matches}
-        lines = [f"找到多个{category.upper()} 候选，请回复序号选择："]
+        lines = [f"找到多个{category.upper()} 候选："]
         for idx, item in enumerate(matches, start=1):
             lines.append(f"{idx}. {self._display_name(item)}")
         logger.info("多候选返回，user_id=%s，数量=%s", user_id, len(matches))
