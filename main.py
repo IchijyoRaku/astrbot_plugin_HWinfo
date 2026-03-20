@@ -1,5 +1,6 @@
 import json
 import re
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,27 @@ from astrbot.core.utils.session_waiter import SessionController, session_waiter
 
 CPU_SINGLE_PATH = Path("data/cpu/r23single.json")
 GPU_PATH = Path("data/gpu/timespy.json")
+QUERY_STOPWORDS = {
+    "cpu",
+    "gpu",
+    "显卡",
+    "处理器",
+    "查询",
+    "查",
+    "看",
+    "参数",
+    "型号",
+    "什么",
+    "多少",
+    "对比",
+    "比较",
+    "相当于",
+    "大概",
+    "约等于",
+    "对应",
+    "接近",
+    "的",
+}
 
 
 @register("astrbot_plugin_HWinfo", "IchijyoRaku", "硬件信息与性能对比插件", "1.0.0")
@@ -26,138 +48,151 @@ class HWInfoPlugin(Star):
             return []
         return json.loads(path.read_text(encoding="utf-8")).get("items", [])
 
-    def _normalize_query(self, text: str) -> str:
+    def _normalize_text(self, text: str) -> str:
         text = text.lower().strip()
         replacements = {
-            " ": "",
-            "-": "",
-            "_": "",
             "geforce": "",
             "radeon": "",
-            "super": "s",
+            "graphics": "",
+            "processor": "",
             "intel": "i",
-            "amd": "a",
+            "amd": "amd",
             "ryzen": "r",
-            "core": "c",
-            "cpu": "cpu",
-            "cpi": "cpu",
-            "显卡": "gpu",
-            "独显": "gpu",
-            "笔电": "mobile",
-            "笔记本": "mobile",
-            "移动版": "mobile",
-            "移动端": "mobile",
+            "core": "i",
+            "ultra": "u",
+            "super": "s",
+            "ti super": "ti",
+            "ti": "ti",
+            "笔记本": "laptop",
+            "笔电": "laptop",
+            "移动版": "laptop",
+            "移动端": "laptop",
             "台式": "desktop",
             "桌面": "desktop",
+            "独显": "gpu",
+            "cpi": "cpu",
+            "cup": "cpu",
         }
         for src, dst in replacements.items():
             text = text.replace(src, dst)
+        text = re.sub(r"[^a-z0-9\u4e00-\u9fa5]+", " ", text)
+        text = re.sub(r"\s+", " ", text).strip()
         return text
 
-    def _item_search_text(self, item: dict[str, Any]) -> str:
-        parts = [
-            str(item.get("vendor", "")),
-            str(item.get("series", "")),
-            str(item.get("name", "")),
-            str(item.get("generation", "")),
-            str(item.get("type", "")),
-        ]
-        return self._normalize_query(" ".join(parts))
+    def _compact_text(self, text: str) -> str:
+        return self._normalize_text(text).replace(" ", "")
 
-    def _extract_model_query(self, text: str) -> str:
-        lowered = text.lower().strip()
-        match = re.search(r"((?:rtx|gtx|rx|i[3579]|r[3579])?\s*\d{3,5}(?:\s*(?:ti|super|s|x|f|k|kf|ks|g|hx|hs|u))?)", lowered)
-        if match:
-            return match.group(1).strip()
-        alnum_matches = re.findall(r"[a-z]+|\d{3,5}", lowered)
-        return " ".join(alnum_matches)
+    def _extract_number_tokens(self, text: str) -> list[str]:
+        return re.findall(r"\d{3,5}[a-z]{0,3}", self._normalize_text(text))
 
-    def _extract_keywords(self, text: str) -> list[str]:
-        lowered = text.lower()
-        keywords = re.findall(r"[a-z]+\d*[a-z]*|\d{3,5}", lowered)
-        return [self._normalize_query(word) for word in keywords if self._normalize_query(word)]
-
-    def _fuzzy_contains(self, query: str, target: str) -> bool:
-        if not query or not target:
-            return False
-        qi = 0
-        for char in target:
-            if qi < len(query) and char == query[qi]:
-                qi += 1
-                if qi == len(query):
-                    return True
-        return False
-
-    def _token_similarity(self, left: str, right: str) -> float:
-        if not left or not right:
-            return 0.0
-        matches = sum(1 for a, b in zip(left, right) if a == b)
-        return matches / max(len(left), len(right), 1)
-
-    def _score_candidate(self, query: str, item: dict[str, Any]) -> float:
-        normalized_query = self._normalize_query(query)
-        target = self._item_search_text(item)
-        if not normalized_query or not target:
-            return 0.0
-
-        score = 0.0
-        model_query = self._normalize_query(self._extract_model_query(query))
-        keywords = self._extract_keywords(query)
-
-        if model_query:
-            if model_query in target:
-                score += 45
-            elif self._fuzzy_contains(model_query, target):
-                score += 30
-            else:
-                similarity = self._token_similarity(model_query, target)
-                if similarity >= 0.45:
-                    score += 25 * similarity
-
-        for keyword in keywords:
-            if keyword in {"cpu", "gpu", "mobile", "desktop"}:
+    def _extract_query_tokens(self, text: str) -> list[str]:
+        normalized = self._normalize_text(text)
+        raw_tokens = re.findall(r"[a-z]+\d*[a-z]*|\d{3,5}[a-z]*", normalized)
+        merged: list[str] = []
+        i = 0
+        while i < len(raw_tokens):
+            token = raw_tokens[i]
+            next_token = raw_tokens[i + 1] if i + 1 < len(raw_tokens) else ""
+            if token in {"rtx", "gtx", "rx", "i", "r", "u"} and next_token and re.fullmatch(r"\d{3,5}[a-z]{0,3}", next_token):
+                merged.append(f"{token}{next_token}")
+                i += 2
                 continue
-            if keyword in target:
-                score += 18
-            elif self._fuzzy_contains(keyword, target):
-                score += 10
-            else:
-                similarity = self._token_similarity(keyword, target)
-                if similarity >= 0.5:
-                    score += 8 * similarity
+            if token in QUERY_STOPWORDS:
+                i += 1
+                continue
+            merged.append(token)
+            i += 1
+        ordered: list[str] = []
+        for token in merged:
+            if token and token not in ordered:
+                ordered.append(token)
+        return ordered
 
-        if normalized_query in target:
-            score += 12 + len(normalized_query) / max(len(target), 1)
-        elif self._fuzzy_contains(normalized_query, target):
-            score += 8 + len(normalized_query) / max(len(target), 1)
-
-        if any(ch.isdigit() for ch in normalized_query):
-            digits = "".join(ch for ch in normalized_query if ch.isdigit())
-            if digits and digits in target:
-                score += 20
-
-        if "mobile" in normalized_query and item.get("type") == "laptop":
-            score += 8
-        if "desktop" in normalized_query and item.get("type") == "desktop":
-            score += 8
-        return score
-
-    def _search_items(self, items: list[dict[str, Any]], query: str, limit: int = 8) -> list[dict[str, Any]]:
-        scored = []
-        for item in items:
-            score = self._score_candidate(query, item)
-            if score > 0:
-                scored.append((score, item))
-        scored.sort(key=lambda x: (-x[0], x[1].get("rank", 999999)))
-        if not scored:
-            return []
-        best_score = scored[0][0]
-        threshold = max(best_score * 0.55, 18)
-        return [item for score, item in scored if score >= threshold][:limit]
+    def _build_search_blob(self, item: dict[str, Any]) -> dict[str, Any]:
+        display_name = self._display_name(item)
+        name = str(item.get("name", ""))
+        vendor = str(item.get("vendor", ""))
+        series = str(item.get("series", ""))
+        generation = str(item.get("generation", ""))
+        item_type = str(item.get("type", ""))
+        full_text = " ".join(part for part in [vendor, series, name, generation, item_type, display_name] if part and part != "Unknown")
+        normalized = self._normalize_text(full_text)
+        compact = normalized.replace(" ", "")
+        tokens = self._extract_query_tokens(full_text)
+        numbers = self._extract_number_tokens(full_text)
+        return {
+            "display_name": display_name,
+            "normalized": normalized,
+            "compact": compact,
+            "tokens": tokens,
+            "numbers": numbers,
+        }
 
     def _display_name(self, item: dict[str, Any]) -> str:
         parts = [item.get("vendor"), item.get("series"), item.get("name")]
         return " ".join(str(p) for p in parts if p and p != "Unknown")
+
+    def _score_candidate(self, query: str, item: dict[str, Any]) -> float:
+        blob = self._build_search_blob(item)
+        query_text = self._normalize_text(query)
+        query_compact = self._compact_text(query)
+        query_tokens = self._extract_query_tokens(query)
+        query_numbers = self._extract_number_tokens(query)
+        if not query_text:
+            return 0.0
+
+        score = 0.0
+        if query_compact and query_compact in blob["compact"]:
+            score += 200
+
+        if query_numbers:
+            matched_numbers = 0
+            for number in query_numbers:
+                if any(number in candidate for candidate in blob["numbers"]):
+                    score += 120
+                    matched_numbers += 1
+            if matched_numbers == 0:
+                return 0.0
+            score += matched_numbers * 20
+
+        for token in query_tokens:
+            if token in blob["tokens"]:
+                score += 45
+                continue
+            if token in blob["compact"]:
+                score += 30
+                continue
+            best_ratio = 0.0
+            for candidate in blob["tokens"]:
+                ratio = SequenceMatcher(None, token, candidate).ratio()
+                if ratio > best_ratio:
+                    best_ratio = ratio
+            if best_ratio >= 0.88:
+                score += 24
+            elif best_ratio >= 0.75:
+                score += 12
+
+        overall_ratio = SequenceMatcher(None, query_compact, blob["compact"]).ratio() if query_compact else 0.0
+        score += overall_ratio * 20
+
+        if "laptop" in query_text and item.get("type") == "laptop":
+            score += 35
+        if "desktop" in query_text and item.get("type") == "desktop":
+            score += 35
+        return score
+
+    def _search_items(self, items: list[dict[str, Any]], query: str, limit: int = 8) -> list[dict[str, Any]]:
+        scored: list[tuple[float, dict[str, Any]]] = []
+        for item in items:
+            score = self._score_candidate(query, item)
+            if score > 0:
+                scored.append((score, item))
+        scored.sort(key=lambda x: (-x[0], x[1].get("rank", 999999), self._display_name(x[1])))
+        if not scored:
+            return []
+        best_score = scored[0][0]
+        threshold = max(25, best_score * 0.65)
+        return [item for score, item in scored if score >= threshold][:limit]
 
     def _format_item_detail(self, category: str, item: dict[str, Any]) -> str:
         rows = []
@@ -252,14 +287,12 @@ class HWInfoPlugin(Star):
             event.stop_event()
 
     def _extract_type_and_query(self, text: str) -> tuple[str, str]:
-        text = text.strip()
-        lowered = text.lower()
-        gpu_type = "laptop" if any(word in lowered for word in ["笔电", "笔记本", "laptop", "mobile"]) else "desktop"
-        cleaned = lowered
-        for token in ["笔电", "笔记本", "laptop", "mobile", "台式", "desktop", "显卡", "gpu", "相当于", "什么", "型号", "的", "对应", "接近", "大概", "约等于"]:
-            cleaned = cleaned.replace(token, " ")
-        cleaned = re.sub(r"\s+", " ", cleaned).strip()
-        return gpu_type, cleaned
+        lowered = self._normalize_text(text)
+        source_type = "laptop" if "laptop" in lowered else "desktop"
+        for token in ["显卡", "gpu", "相当于", "比较", "对比", "什么", "型号", "对应", "接近", "大概", "约等于"]:
+            lowered = lowered.replace(token, " ")
+        lowered = re.sub(r"\s+", " ", lowered).strip()
+        return source_type, lowered
 
     def _extract_gpu_rank(self, item: dict[str, Any]) -> int | None:
         match = re.search(r"(\d{3,4})", str(item.get("name", "")))
@@ -280,11 +313,9 @@ class HWInfoPlugin(Star):
     def _pick_generation_equivalent(self, base_item: dict[str, Any], candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
         if not candidates:
             return None
-
         preferred = self._prefer_same_vendor(base_item, candidates)
         base_score = base_item["score"]
         base_generation = self._gpu_generation_priority(base_item)
-
         grouped: dict[int, list[dict[str, Any]]] = {}
         for item in preferred:
             generation = self._gpu_generation_priority(item)
@@ -306,15 +337,7 @@ class HWInfoPlugin(Star):
             if diff_ratio <= 0.10:
                 return best
 
-        if preferred:
-            return min(
-                preferred,
-                key=lambda item: (
-                    abs(self._gpu_generation_priority(item) - base_generation) if base_generation >= 0 and self._gpu_generation_priority(item) >= 0 else 99,
-                    abs(item["score"] - base_score),
-                ),
-            )
-        return None
+        return min(preferred, key=lambda item: abs(item["score"] - base_score))
 
     def _find_equivalent_gpus(self, base_item: dict[str, Any], target_type: str) -> list[dict[str, Any]]:
         candidates = [
@@ -324,25 +347,20 @@ class HWInfoPlugin(Star):
         match = self._pick_generation_equivalent(base_item, candidates)
         return [match] if match else []
 
-    def _format_compare_result(
-        self,
-        base_item: dict[str, Any],
-        target_items: list[dict[str, Any]],
-    ) -> str:
+    def _format_compare_result(self, base_item: dict[str, Any], target_items: list[dict[str, Any]]) -> str:
         base_name = self._display_name(base_item)
-        lines = ["显卡性能对比"]
-        for item in [base_item] + target_items:
-            percent = f"{round(item['score'] / base_item['score'] * 100)}%"
-            lines.append(
-                f"- {self._display_name(item)}｜类型：{item.get('type', '-')}｜代际：{item.get('generation') or '-'}｜跑分：{item.get('score')}｜相对基准：{percent}"
-            )
         target_item = target_items[0]
         diff_ratio = (target_item["score"] - base_item["score"]) / max(base_item["score"], 1)
         diff_percent = f"{diff_ratio * 100:+.1f}%"
-        lines.insert(
-            1,
-            f"结论：{base_name} ≈ {self._display_name(target_item)}｜{base_item['score']} vs {target_item['score']}｜差距 {diff_percent}",
-        )
+        lines = [
+            "显卡性能对比",
+            f"结论：{base_name} ≈ {self._display_name(target_item)}",
+            f"基准跑分：{base_item['score']}",
+            f"对比跑分：{target_item['score']}",
+            f"性能差距：{diff_percent}",
+            f"基准类型：{base_item.get('type', '-')}",
+            f"对比类型：{target_item.get('type', '-')}",
+        ]
         return "\n".join(lines)
 
     @filter.command("cpu")
@@ -364,12 +382,13 @@ class HWInfoPlugin(Star):
         source_type, query = self._extract_type_and_query(text)
         target_type = "desktop" if source_type == "laptop" else "laptop"
         matches = [item for item in self._search_items(self.gpu_items, query, limit=20) if item.get("type") == source_type]
-        if not matches and any(ch.isdigit() for ch in query):
-            digits = "".join(ch for ch in query if ch.isdigit())
-            matches = [
-                item for item in self.gpu_items
-                if item.get("type") == source_type and digits and digits in str(item.get("name", ""))
-            ]
+        if not matches:
+            query_numbers = self._extract_number_tokens(query)
+            if query_numbers:
+                matches = [
+                    item for item in self.gpu_items
+                    if item.get("type") == source_type and any(number in self._build_search_blob(item)["compact"] for number in query_numbers)
+                ]
         if not matches:
             yield event.plain_result("未找到比较型号。")
             return
