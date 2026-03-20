@@ -35,9 +35,9 @@ class HWInfoPlugin(Star):
             "radeon": "",
             "graphics": "",
             "processor": "",
-            "intel": "",
-            "amd": "",
-            "ryzen": "ryzen",
+            "intel": "intel ",
+            "amd": "amd ",
+            "ryzen": "ryzen ",
             "core ultra": "coreultra",
             "core": "core",
             "ultra": "ultra",
@@ -81,13 +81,24 @@ class HWInfoPlugin(Star):
             f"{series} {name}".strip(),
             f"{vendor} {series} {name}".strip(),
             name,
+            self._compact(name),
+            self._compact(f"{series} {name}"),
         }
-        if vendor == "AMD" and series.startswith("Ryzen"):
-            aliases.add(f"{series.replace('Ryzen ', 'r')} {name}".strip())
-            aliases.add(f"{series.replace('Ryzen ', '')} {name}".strip())
-        if vendor == "Intel" and series.startswith("Core"):
-            aliases.add(f"{series.replace('Core ', 'i')} {name}".strip())
-            aliases.add(f"{series.replace('Core Ultra ', 'ultra ')} {name}".strip())
+        if vendor.upper() == "AMD" and series.startswith("Ryzen"):
+            series_level = series.replace("Ryzen", "").strip()
+            aliases.add(f"ryzen {series_level} {name}".strip())
+            aliases.add(f"r{series_level} {name}".strip())
+            aliases.add(f"{series_level} {name}".strip())
+            aliases.add(f"{series_level}{name}".strip())
+            aliases.add(name.replace(" ", ""))
+        if vendor.upper() == "INTEL" and series.startswith("Core"):
+            compact_name = name.replace(" ", "")
+            aliases.add(compact_name)
+            aliases.add(f"{series} {compact_name}".strip())
+            if series.startswith("Core Ultra"):
+                aliases.add(f"ultra {compact_name}".strip())
+            else:
+                aliases.add(f"{series.replace('Core', 'i').strip()} {compact_name}".strip())
         return [alias for alias in aliases if alias]
 
     def _score_candidate(self, query: str, item: dict[str, Any]) -> float:
@@ -99,35 +110,40 @@ class HWInfoPlugin(Star):
 
         aliases = self._item_aliases(item)
         best_score = 0.0
+        normalized_query = self._normalize_text(query)
         for alias in aliases:
             alias_compact = self._compact(alias)
             alias_tokens = self._extract_text_tokens(alias)
             score = 0.0
 
             if query_compact == alias_compact:
-                score += 200
+                score += 260
             elif query_compact in alias_compact:
-                score += 160
+                score += 220
+            elif alias_compact in query_compact:
+                score += 120
 
             if query_numbers:
                 matched_numbers = 0
                 for number in query_numbers:
                     if number in alias_compact:
-                        score += 100
+                        score += 120
                         matched_numbers += 1
                 if matched_numbers == 0:
                     continue
-                score += matched_numbers * 20
+                score += matched_numbers * 30
 
             for token in query_tokens:
                 if token in alias_compact:
-                    score += 25
+                    score += 35
                 elif any(token == alias_token for alias_token in alias_tokens):
-                    score += 20
+                    score += 25
 
-            if "laptop" in self._normalize_text(query) and item.get("type") == "laptop":
+            if normalized_query.startswith("cpu"):
+                score += 5
+            if "laptop" in normalized_query and item.get("type") == "laptop":
                 score += 30
-            if "desktop" in self._normalize_text(query) and item.get("type") == "desktop":
+            if "desktop" in normalized_query and item.get("type") == "desktop":
                 score += 30
 
             if score > best_score:
@@ -144,7 +160,7 @@ class HWInfoPlugin(Star):
         if not scored:
             return []
         best_score = scored[0][0]
-        threshold = max(80, best_score * 0.7)
+        threshold = max(60, best_score * 0.6)
         return [item for score, item in scored if score >= threshold][:limit]
 
     def _format_item_detail(self, category: str, item: dict[str, Any]) -> str:
