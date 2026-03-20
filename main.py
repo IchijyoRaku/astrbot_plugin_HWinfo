@@ -48,7 +48,13 @@ class HWInfoPlugin(Star):
         yield event.chain_result(self._image_chain(GPU_RANK_IMAGE))
 
     def _display_name(self, item: dict[str, Any]) -> str:
-        parts = [item.get("vendor"), item.get("series"), item.get("name")]
+        vendor = item.get("vendor")
+        series = item.get("series")
+        name = item.get("name")
+        if vendor in {"AMD", "Apple", "INTEL"}:
+            model = " ".join(str(part) for part in [series, name] if part and part != "Unknown")
+            return " ".join(str(part) for part in [vendor, model] if part and part != "Unknown")
+        parts = [vendor, series, name]
         return " ".join(str(part) for part in parts if part and part != "Unknown")
 
     def _normalize_query_model(self, text: str) -> str:
@@ -58,6 +64,8 @@ class HWInfoPlugin(Star):
         text = text.replace("笔记本", "laptop").replace("笔电", "laptop")
         text = text.replace("台式", "desktop").replace("桌面", "desktop")
         text = re.sub(r"[^a-z0-9]+", "", text)
+        if re.search(r"\d{3,5}m$", text):
+            text = text[:-1] + "mobile"
         return text
 
     def _extract_model_core_and_suffix(self, text: str) -> tuple[str, str]:
@@ -134,23 +142,38 @@ class HWInfoPlugin(Star):
 
     def _format_item_detail(self, category: str, item: dict[str, Any]) -> str:
         rows = []
-        for label, key in [
-            ("厂商", "vendor"),
-            ("系列", "series"),
-            ("型号", "name"),
-            ("类型", "type"),
-            ("代际", "generation"),
-            ("显存容量", "memory_size"),
-            ("显存类型", "memory_type"),
-            ("发布日期", "release_date"),
-            ("跑分", "score"),
-            ("核心数", "cores"),
-            ("线程数", "threads"),
-            ("P 核", "p_cores"),
-            ("E 核", "e_cores"),
-            ("基准频率", "base_clock"),
-        ]:
-            value = item.get(key)
+        vendor = str(item.get("vendor", ""))
+        if category == "cpu":
+            field_pairs = [
+                ("厂商", "vendor"),
+                ("型号", None),
+                ("跑分", "score"),
+                ("核心数", "cores"),
+                ("线程数", "threads"),
+                ("基准频率", "base_clock"),
+            ]
+            show_hybrid = vendor not in {"AMD", "Apple"}
+            if show_hybrid:
+                field_pairs.extend([
+                    ("P 核", "p_cores"),
+                    ("E 核", "e_cores"),
+                ])
+        else:
+            field_pairs = [
+                ("厂商", "vendor"),
+                ("系列", "series"),
+                ("型号", "name"),
+                ("类型", "type"),
+                ("代际", "generation"),
+                ("显存容量", "memory_size"),
+                ("显存类型", "memory_type"),
+                ("跑分", "score"),
+            ]
+        for label, key in field_pairs:
+            if label == "型号" and category == "cpu":
+                rows.append(f"型号：{self._display_name(item).replace(vendor + ' ', '', 1) if vendor else self._display_name(item)}")
+                continue
+            value = item.get(key) if key else None
             if value is None or value == "Unknown":
                 continue
             rows.append(f"{label}：{value}")
