@@ -72,6 +72,11 @@ class HWInfoPlugin(Star):
         alnum_matches = re.findall(r"[a-z]+|\d{3,5}", lowered)
         return " ".join(alnum_matches)
 
+    def _extract_keywords(self, text: str) -> list[str]:
+        lowered = text.lower()
+        keywords = re.findall(r"[a-z]+\d*[a-z]*|\d{3,5}", lowered)
+        return [self._normalize_query(word) for word in keywords if self._normalize_query(word)]
+
     def _fuzzy_contains(self, query: str, target: str) -> bool:
         if not query or not target:
             return False
@@ -97,15 +102,29 @@ class HWInfoPlugin(Star):
 
         score = 0.0
         model_query = self._normalize_query(self._extract_model_query(query))
+        keywords = self._extract_keywords(query)
+
         if model_query:
             if model_query in target:
-                score += 35
+                score += 45
             elif self._fuzzy_contains(model_query, target):
-                score += 24
+                score += 30
             else:
                 similarity = self._token_similarity(model_query, target)
-                if similarity >= 0.6:
-                    score += 18 * similarity
+                if similarity >= 0.45:
+                    score += 25 * similarity
+
+        for keyword in keywords:
+            if keyword in {"cpu", "gpu", "mobile", "desktop"}:
+                continue
+            if keyword in target:
+                score += 18
+            elif self._fuzzy_contains(keyword, target):
+                score += 10
+            else:
+                similarity = self._token_similarity(keyword, target)
+                if similarity >= 0.5:
+                    score += 8 * similarity
 
         if normalized_query in target:
             score += 12 + len(normalized_query) / max(len(target), 1)
@@ -115,12 +134,12 @@ class HWInfoPlugin(Star):
         if any(ch.isdigit() for ch in normalized_query):
             digits = "".join(ch for ch in normalized_query if ch.isdigit())
             if digits and digits in target:
-                score += 12
+                score += 20
 
         if "mobile" in normalized_query and item.get("type") == "laptop":
-            score += 5
+            score += 8
         if "desktop" in normalized_query and item.get("type") == "desktop":
-            score += 5
+            score += 8
         return score
 
     def _search_items(self, items: list[dict[str, Any]], query: str, limit: int = 8) -> list[dict[str, Any]]:
@@ -130,7 +149,11 @@ class HWInfoPlugin(Star):
             if score > 0:
                 scored.append((score, item))
         scored.sort(key=lambda x: (-x[0], x[1].get("rank", 999999)))
-        return [item for _, item in scored[:limit]]
+        if not scored:
+            return []
+        best_score = scored[0][0]
+        threshold = max(best_score * 0.55, 18)
+        return [item for score, item in scored if score >= threshold][:limit]
 
     def _display_name(self, item: dict[str, Any]) -> str:
         parts = [item.get("vendor"), item.get("series"), item.get("name")]
@@ -230,9 +253,10 @@ class HWInfoPlugin(Star):
 
     def _extract_type_and_query(self, text: str) -> tuple[str, str]:
         text = text.strip()
-        gpu_type = "laptop" if any(word in text.lower() for word in ["笔电", "笔记本", "laptop", "mobile"]) else "desktop"
-        cleaned = text.lower()
-        for token in ["笔电", "笔记本", "laptop", "mobile", "台式", "desktop", "显卡", "gpu", "相当于", "什么", "型号", "的"]:
+        lowered = text.lower()
+        gpu_type = "laptop" if any(word in lowered for word in ["笔电", "笔记本", "laptop", "mobile"]) else "desktop"
+        cleaned = lowered
+        for token in ["笔电", "笔记本", "laptop", "mobile", "台式", "desktop", "显卡", "gpu", "相当于", "什么", "型号", "的", "对应", "接近", "大概", "约等于"]:
             cleaned = cleaned.replace(token, " ")
         cleaned = re.sub(r"\s+", " ", cleaned).strip()
         return gpu_type, cleaned
@@ -340,6 +364,12 @@ class HWInfoPlugin(Star):
         source_type, query = self._extract_type_and_query(text)
         target_type = "desktop" if source_type == "laptop" else "laptop"
         matches = [item for item in self._search_items(self.gpu_items, query, limit=20) if item.get("type") == source_type]
+        if not matches and any(ch.isdigit() for ch in query):
+            digits = "".join(ch for ch in query if ch.isdigit())
+            matches = [
+                item for item in self.gpu_items
+                if item.get("type") == source_type and digits and digits in str(item.get("name", ""))
+            ]
         if not matches:
             yield event.plain_result("未找到比较型号。")
             return
