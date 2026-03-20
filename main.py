@@ -165,7 +165,19 @@ class HWInfoPlugin(Star):
             return []
         best_score = scored[0][0]
         threshold = max(60, best_score * 0.6)
-        return [item for score, item in scored if score >= threshold][:limit]
+        candidates = [item for score, item in scored if score >= threshold]
+        if candidates:
+            return candidates[:limit]
+
+        query_numbers = self._extract_number_tokens(query)
+        if query_numbers:
+            fallback = [
+                item for _, item in scored
+                if all(number in self._compact(self._display_name(item)) for number in query_numbers)
+            ]
+            if fallback:
+                return fallback[:limit]
+        return [item for _, item in scored[:limit]]
 
     def _format_item_detail(self, category: str, item: dict[str, Any]) -> str:
         rows = []
