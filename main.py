@@ -81,10 +81,20 @@ class HWInfoPlugin(Star):
             "geforce": "",
             "radeon": "",
             "super": "s",
+            "intel": "i",
+            "amd": "a",
+            "ryzen": "r",
+            "core": "c",
+            "cpu": "cpu",
+            "cpi": "cpu",
+            "显卡": "gpu",
+            "独显": "gpu",
             "笔电": "mobile",
             "笔记本": "mobile",
+            "移动版": "mobile",
+            "移动端": "mobile",
             "台式": "desktop",
-            "独显": "gpu",
+            "桌面": "desktop",
         }
         for src, dst in replacements.items():
             text = text.replace(src, dst)
@@ -102,11 +112,28 @@ class HWInfoPlugin(Star):
 
     def _extract_model_query(self, text: str) -> str:
         lowered = text.lower().strip()
-        match = re.search(r"((?:rtx|gtx|rx)?\s*\d{3,4}(?:\s*(?:ti|super|s))?)", lowered)
+        match = re.search(r"((?:rtx|gtx|rx|i[3579]|r[3579])?\s*\d{3,5}(?:\s*(?:ti|super|s|x|f|k|kf|ks|g|hx|hs|u))?)", lowered)
         if match:
             return match.group(1).strip()
-        alnum_matches = re.findall(r"[a-z]+|\d{3,4}", lowered)
+        alnum_matches = re.findall(r"[a-z]+|\d{3,5}", lowered)
         return " ".join(alnum_matches)
+
+    def _fuzzy_contains(self, query: str, target: str) -> bool:
+        if not query or not target:
+            return False
+        qi = 0
+        for char in target:
+            if qi < len(query) and char == query[qi]:
+                qi += 1
+                if qi == len(query):
+                    return True
+        return False
+
+    def _token_similarity(self, left: str, right: str) -> float:
+        if not left or not right:
+            return 0.0
+        matches = sum(1 for a, b in zip(left, right) if a == b)
+        return matches / max(len(left), len(right), 1)
 
     def _score_candidate(self, query: str, item: dict[str, Any]) -> float:
         normalized_query = self._normalize_query(query)
@@ -114,18 +141,33 @@ class HWInfoPlugin(Star):
         if not normalized_query or not target:
             return 0.0
 
+        score = 0.0
         model_query = self._normalize_query(self._extract_model_query(query))
-        if model_query and model_query in target:
-            bonus = 30
-            if "mobile" in normalized_query and item.get("type") == "laptop":
-                bonus += 5
-            if "desktop" in normalized_query and item.get("type") == "desktop":
-                bonus += 5
-            return bonus + len(model_query) / max(len(target), 1)
+        if model_query:
+            if model_query in target:
+                score += 35
+            elif self._fuzzy_contains(model_query, target):
+                score += 24
+            else:
+                similarity = self._token_similarity(model_query, target)
+                if similarity >= 0.6:
+                    score += 18 * similarity
 
         if normalized_query in target:
-            return 10 + len(normalized_query) / max(len(target), 1)
-        return 0.0
+            score += 12 + len(normalized_query) / max(len(target), 1)
+        elif self._fuzzy_contains(normalized_query, target):
+            score += 8 + len(normalized_query) / max(len(target), 1)
+
+        if any(ch.isdigit() for ch in normalized_query):
+            digits = "".join(ch for ch in normalized_query if ch.isdigit())
+            if digits and digits in target:
+                score += 12
+
+        if "mobile" in normalized_query and item.get("type") == "laptop":
+            score += 5
+        if "desktop" in normalized_query and item.get("type") == "desktop":
+            score += 5
+        return score
 
     def _search_items(self, items: list[dict[str, Any]], query: str, limit: int = 8) -> list[dict[str, Any]]:
         scored = []
@@ -257,43 +299,62 @@ class HWInfoPlugin(Star):
             return None
         return int(match.group(1))
 
+    def _gpu_generation_priority(self, item: dict[str, Any]) -> int:
+        rank = self._extract_gpu_rank(item)
+        if rank is None:
+            return -1
+        return rank // 1000 if rank >= 1000 else rank // 100
+
     def _prefer_same_vendor(self, base_item: dict[str, Any], candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
         same_vendor = [item for item in candidates if item.get("vendor") == base_item.get("vendor")]
         return same_vendor or candidates
 
-    def _pick_range_equivalent(self, base_item: dict[str, Any], candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
+    def _pick_generation_equivalent(self, base_item: dict[str, Any], candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
         if not candidates:
             return None
 
         preferred = self._prefer_same_vendor(base_item, candidates)
-        base_rank = self._extract_gpu_rank(base_item)
         base_score = base_item["score"]
-        ranked = [item for item in preferred if self._extract_gpu_rank(item) is not None]
+        base_generation = self._gpu_generation_priority(base_item)
 
-        if ranked and base_rank is not None:
-            same_tier = [item for item in ranked if abs(self._extract_gpu_rank(item) - base_rank) <= 20]
-            if same_tier:
-                return min(same_tier, key=lambda item: abs(item["score"] - base_score))
+        grouped: dict[int, list[dict[str, Any]]] = {}
+        for item in preferred:
+            generation = self._gpu_generation_priority(item)
+            if generation < 0:
+                continue
+            grouped.setdefault(generation, []).append(item)
 
-            lower_band = [item for item in ranked if 30 <= base_rank - self._extract_gpu_rank(item) <= 90]
-            if lower_band:
-                return min(lower_band, key=lambda item: (base_rank - self._extract_gpu_rank(item), abs(item["score"] - base_score)))
+        ordered_generations: list[int] = []
+        if base_generation >= 0:
+            ordered_generations.append(base_generation)
+        ordered_generations.extend(g for g in sorted(grouped.keys(), reverse=True) if g not in ordered_generations)
 
-        return min(preferred, key=lambda item: abs(item["score"] - base_score))
+        for generation in ordered_generations:
+            generation_items = grouped.get(generation, [])
+            if not generation_items:
+                continue
+            best = min(generation_items, key=lambda item: abs(item["score"] - base_score))
+            diff_ratio = abs(best["score"] - base_score) / max(base_score, 1)
+            if diff_ratio <= 0.10:
+                return best
+
+        if preferred:
+            return min(
+                preferred,
+                key=lambda item: (
+                    abs(self._gpu_generation_priority(item) - base_generation) if base_generation >= 0 and self._gpu_generation_priority(item) >= 0 else 99,
+                    abs(item["score"] - base_score),
+                ),
+            )
+        return None
 
     def _find_equivalent_gpus(self, base_item: dict[str, Any], target_type: str) -> list[dict[str, Any]]:
-        base_score = base_item["score"]
         candidates = [
             item for item in self.gpu_items
             if item.get("type") == target_type and item.get("generation")
         ]
-        within = [item for item in candidates if abs(item["score"] - base_score) / base_score <= 0.05]
-        range_match = self._pick_range_equivalent(base_item, within)
-        if range_match:
-            return [range_match]
-
-        fallback = self._pick_range_equivalent(base_item, candidates)
-        return [fallback] if fallback else []
+        match = self._pick_generation_equivalent(base_item, candidates)
+        return [match] if match else []
 
     async def _render_compare_image(
         self,
@@ -359,7 +420,13 @@ class HWInfoPlugin(Star):
             yield event.plain_result("未找到可比较的目标显卡。")
             return
 
-        conclusion = f"结论：{base_item.get('name')} 相当于 {target_items[0].get('name')}"
+        target_item = target_items[0]
+        diff_ratio = (target_item["score"] - base_item["score"]) / max(base_item["score"], 1)
+        diff_percent = f"{diff_ratio * 100:+.1f}%"
+        conclusion = (
+            f"结论：{self._display_name(base_item)} ≈ {self._display_name(target_item)} ｜ "
+            f"{base_item['score']} vs {target_item['score']} ｜ 差距 {diff_percent}"
+        )
         image_url = await self._render_compare_image(base_item, target_items, conclusion=conclusion)
         yield event.chain_result([Comp.Image.fromURL(image_url)])
 
