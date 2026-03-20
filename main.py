@@ -21,9 +21,10 @@ class HWInfoPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
         self.cpu_items = self._load_items(CPU_SINGLE_PATH)
+        self.cpu_multi_items = self._load_items(BASE_DIR / "data/cpu/r23multi.json")
         self.gpu_items = self._load_items(GPU_PATH)
         self.pending_choices: dict[str, dict[str, Any]] = {}
-        logger.info("[%s] 插件初始化完成，CPU=%s，GPU=%s", PLUGIN_VERSION, len(self.cpu_items), len(self.gpu_items))
+        logger.info("[%s] 插件初始化完成，CPU(single)=%s，CPU(multi)=%s，GPU=%s", PLUGIN_VERSION, len(self.cpu_items), len(self.cpu_multi_items), len(self.gpu_items))
 
     def _load_items(self, path: Path) -> list[dict[str, Any]]:
         resolved_path = path.resolve()
@@ -140,6 +141,13 @@ class HWInfoPlugin(Star):
         logger.info("候选筛选阈值=%s，筛选后数量=%s", threshold, len(filtered))
         return filtered
 
+    def _find_cpu_multi_score(self, item: dict[str, Any]) -> Any:
+        display_name = self._display_name(item)
+        for cpu_item in self.cpu_multi_items:
+            if self._display_name(cpu_item) == display_name:
+                return cpu_item.get("score")
+        return None
+
     def _format_item_detail(self, category: str, item: dict[str, Any]) -> str:
         rows = []
         vendor = str(item.get("vendor", ""))
@@ -147,7 +155,8 @@ class HWInfoPlugin(Star):
             field_pairs = [
                 ("厂商", "vendor"),
                 ("型号", None),
-                ("跑分", "score"),
+                ("单核跑分", "score"),
+                ("多核跑分", None),
                 ("核心数", "cores"),
                 ("线程数", "threads"),
                 ("基准频率", "base_clock"),
@@ -172,6 +181,11 @@ class HWInfoPlugin(Star):
         for label, key in field_pairs:
             if label == "型号" and category == "cpu":
                 rows.append(f"型号：{self._display_name(item).replace(vendor + ' ', '', 1) if vendor else self._display_name(item)}")
+                continue
+            if label == "多核跑分" and category == "cpu":
+                multi_score = self._find_cpu_multi_score(item)
+                if multi_score is not None:
+                    rows.append(f"多核跑分：{multi_score}")
                 continue
             value = item.get(key) if key else None
             if value is None or value == "Unknown":
