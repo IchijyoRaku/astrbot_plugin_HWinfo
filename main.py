@@ -9,9 +9,10 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
 from astrbot.core.utils.session_waiter import SessionController, session_waiter
 
-CPU_SINGLE_PATH = Path("data/cpu/r23single.json")
-GPU_PATH = Path("data/gpu/timespy.json")
-GPU_RANK_IMAGE = Path("data/gpu/显卡天梯图.png")
+BASE_DIR = Path(__file__).resolve().parent
+CPU_SINGLE_PATH = BASE_DIR / "data/cpu/r23single.json"
+GPU_PATH = BASE_DIR / "data/gpu/timespy.json"
+GPU_RANK_IMAGE = BASE_DIR / "data/gpu/显卡天梯图.png"
 PLUGIN_VERSION = "0.1"
 
 
@@ -25,17 +26,19 @@ class HWInfoPlugin(Star):
         logger.info("[%s] 插件初始化完成，CPU=%s，GPU=%s", PLUGIN_VERSION, len(self.cpu_items), len(self.gpu_items))
 
     def _load_items(self, path: Path) -> list[dict[str, Any]]:
-        logger.info("开始读取数据文件: %s", path)
-        if not path.exists():
-            logger.warning("数据文件不存在: %s", path)
+        resolved_path = path.resolve()
+        logger.info("开始读取数据文件: %s", resolved_path)
+        logger.info("数据文件存在性检查: %s -> %s", resolved_path, resolved_path.exists())
+        if not resolved_path.exists():
+            logger.warning("数据文件不存在: %s", resolved_path)
             return []
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(resolved_path.read_text(encoding="utf-8"))
         items = data.get("items", [])
-        logger.info("数据文件读取完成: %s，version=%s，count=%s", path, data.get("version"), len(items))
+        logger.info("数据文件读取完成: %s，version=%s，count=%s", resolved_path, data.get("version"), len(items))
         return items
 
     def _resolve_image_path(self, path: Path | str) -> str:
-        return str((Path(__file__).parent / Path(path)).resolve())
+        return str(Path(path).resolve())
 
     def _image_chain(self, path: Path | str):
         return [Comp.Image.fromFileSystem(self._resolve_image_path(path))]
