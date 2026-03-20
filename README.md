@@ -1,14 +1,15 @@
-# astrbot-plugin-helloworld
+# astrbot_plugin_HWinfo
 
-AstrBot 插件模板 / A template plugin for AstrBot plugin feature
+用于 [`AstrBot`](https://docs.astrbot.app/) 的硬件信息查询与性能比较插件。
 
-> [!NOTE]
-> This repo is just a template of [AstrBot](https://github.com/AstrBotDevs/AstrBot) Plugin.
-> 
-> [AstrBot](https://github.com/AstrBotDevs/AstrBot) is an agentic assistant for both personal and group conversations. It can be deployed across dozens of mainstream instant messaging platforms, including QQ, Telegram, Feishu, DingTalk, Slack, LINE, Discord, Matrix, etc. In addition, it provides a reliable and extensible conversational AI infrastructure for individuals, developers, and teams. Whether you need a personal AI companion, an intelligent customer support agent, an automation assistant, or an enterprise knowledge base, AstrBot enables you to quickly build AI applications directly within your existing messaging workflows.
+## 功能
 
-# Supports
+- CPU 型号模糊搜索，指令示例：[`cpu 9700x`](main.py)
+- GPU 型号模糊搜索，指令示例：[`gpu 5070ti`](main.py)
+- 笔电/台式显卡性能对比，支持类似“笔电的5070相当于台式什么显卡”这类问题
+- 发送 [`显卡天梯图`](main.py)
 
-- [AstrBot Repo](https://github.com/AstrBotDevs/AstrBot)
-- [AstrBot Plugin Development Docs (Chinese)](https://docs.astrbot.app/dev/star/plugin-new.html)
-- [AstrBot Plugin Development Docs (English)](https://docs.astrbot.app/en/dev/star/plugin-new.html)
+## 致谢
+
+- [`topcpu`](https://www.topcpu.net/)
+- 百度贴吧 @永眠长安
