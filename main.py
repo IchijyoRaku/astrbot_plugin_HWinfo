@@ -1,10 +1,8 @@
 import json
 import re
-from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
-import astrbot.api.message_components as Comp
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
@@ -81,11 +79,11 @@ class HWInfoPlugin(Star):
             "_": "",
             "geforce": "",
             "radeon": "",
-            "rtx": "",
-            "gtx": "",
-            "rx": "",
             "super": "s",
-            "ti": "ti",
+            "笔电": "mobile",
+            "笔记本": "mobile",
+            "台式": "desktop",
+            "独显": "gpu",
         }
         for src, dst in replacements.items():
             text = text.replace(src, dst)
@@ -101,20 +99,38 @@ class HWInfoPlugin(Star):
         ]
         return self._normalize_query(" ".join(parts))
 
+    def _extract_model_query(self, text: str) -> str:
+        lowered = text.lower().strip()
+        match = re.search(r"((?:rtx|gtx|rx)?\s*\d{3,4}(?:\s*(?:ti|super|s))?)", lowered)
+        if match:
+            return match.group(1).strip()
+        alnum_matches = re.findall(r"[a-z]+|\d{3,4}", lowered)
+        return " ".join(alnum_matches)
+
     def _score_candidate(self, query: str, item: dict[str, Any]) -> float:
         normalized_query = self._normalize_query(query)
         target = self._item_search_text(item)
         if not normalized_query or not target:
             return 0.0
+
+        model_query = self._normalize_query(self._extract_model_query(query))
+        if model_query and model_query in target:
+            bonus = 30
+            if "mobile" in normalized_query and item.get("type") == "laptop":
+                bonus += 5
+            if "desktop" in normalized_query and item.get("type") == "desktop":
+                bonus += 5
+            return bonus + len(model_query) / max(len(target), 1)
+
         if normalized_query in target:
             return 10 + len(normalized_query) / max(len(target), 1)
-        return SequenceMatcher(None, normalized_query, target).ratio()
+        return 0.0
 
     def _search_items(self, items: list[dict[str, Any]], query: str, limit: int = 8) -> list[dict[str, Any]]:
         scored = []
         for item in items:
             score = self._score_candidate(query, item)
-            if score >= 0.45:
+            if score > 0:
                 scored.append((score, item))
         scored.sort(key=lambda x: (-x[0], x[1].get("rank", 999999)))
         return [item for _, item in scored[:limit]]
@@ -157,7 +173,19 @@ class HWInfoPlugin(Star):
             options={},
         )
 
+    async def _send_rank_image(self, event: AstrMessageEvent):
+        yield event.image_result(str(GPU_RANK_IMAGE))
+
     async def _handle_search(self, event: AstrMessageEvent, category: str, query: str, items: list[dict[str, Any]]):
+        query = query.strip()
+        if not query:
+            if category == "gpu":
+                async for result in self._send_rank_image(event):
+                    yield result
+            else:
+                yield event.plain_result(f"请输入要查询的{category.upper()} 型号。")
+            return
+
         matches = self._search_items(items, query)
         if not matches:
             yield event.plain_result(f"未找到和 {query} 相关的{category.upper()} 型号。")
@@ -209,12 +237,42 @@ class HWInfoPlugin(Star):
 
     def _extract_type_and_query(self, text: str) -> tuple[str, str]:
         text = text.strip()
-        gpu_type = "laptop" if any(word in text for word in ["笔电", "笔记本", "laptop", "mobile"] ) else "desktop"
-        cleaned = text
+        gpu_type = "laptop" if any(word in text.lower() for word in ["笔电", "笔记本", "laptop", "mobile"]) else "desktop"
+        cleaned = text.lower()
         for token in ["笔电", "笔记本", "laptop", "mobile", "台式", "desktop", "显卡", "gpu", "相当于", "什么", "型号", "的"]:
             cleaned = cleaned.replace(token, " ")
         cleaned = re.sub(r"\s+", " ", cleaned).strip()
         return gpu_type, cleaned
+
+    def _extract_gpu_rank(self, item: dict[str, Any]) -> int | None:
+        match = re.search(r"(\d{3,4})", str(item.get("name", "")))
+        if not match:
+            return None
+        return int(match.group(1))
+
+    def _prefer_same_vendor(self, base_item: dict[str, Any], candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        same_vendor = [item for item in candidates if item.get("vendor") == base_item.get("vendor")]
+        return same_vendor or candidates
+
+    def _pick_range_equivalent(self, base_item: dict[str, Any], candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
+        if not candidates:
+            return None
+
+        preferred = self._prefer_same_vendor(base_item, candidates)
+        base_rank = self._extract_gpu_rank(base_item)
+        base_score = base_item["score"]
+        ranked = [item for item in preferred if self._extract_gpu_rank(item) is not None]
+
+        if ranked and base_rank is not None:
+            same_tier = [item for item in ranked if abs(self._extract_gpu_rank(item) - base_rank) <= 20]
+            if same_tier:
+                return min(same_tier, key=lambda item: abs(item["score"] - base_score))
+
+            lower_band = [item for item in ranked if 30 <= base_rank - self._extract_gpu_rank(item) <= 90]
+            if lower_band:
+                return min(lower_band, key=lambda item: (base_rank - self._extract_gpu_rank(item), abs(item["score"] - base_score)))
+
+        return min(preferred, key=lambda item: abs(item["score"] - base_score))
 
     def _find_equivalent_gpus(self, base_item: dict[str, Any], target_type: str) -> list[dict[str, Any]]:
         base_score = base_item["score"]
@@ -222,32 +280,20 @@ class HWInfoPlugin(Star):
             item for item in self.gpu_items
             if item.get("type") == target_type and item.get("generation")
         ]
-        within = []
-        for item in candidates:
-            diff_ratio = abs(item["score"] - base_score) / base_score
-            if diff_ratio <= 0.05:
-                within.append((diff_ratio, item))
-        if within:
-            within.sort(key=lambda x: (x[0], abs(x[1]["score"] - base_score)))
-            return [within[0][1]]
+        within = [item for item in candidates if abs(item["score"] - base_score) / base_score <= 0.05]
+        range_match = self._pick_range_equivalent(base_item, within)
+        if range_match:
+            return [range_match]
 
-        lower = None
-        higher = None
-        for item in candidates:
-            if item["score"] < base_score:
-                if lower is None or item["score"] > lower["score"]:
-                    lower = item
-            elif item["score"] > base_score:
-                if higher is None or item["score"] < higher["score"]:
-                    higher = item
-        result = []
-        if lower:
-            result.append(lower)
-        if higher:
-            result.append(higher)
-        return result
+        fallback = self._pick_range_equivalent(base_item, candidates)
+        return [fallback] if fallback else []
 
-    async def _render_compare_image(self, base_item: dict[str, Any], target_items: list[dict[str, Any]]) -> str:
+    async def _render_compare_image(
+        self,
+        base_item: dict[str, Any],
+        target_items: list[dict[str, Any]],
+        conclusion: str | None = None,
+    ) -> str:
         base_name = self._display_name(base_item)
         rows = []
         all_items = [base_item] + target_items
@@ -262,7 +308,8 @@ class HWInfoPlugin(Star):
                     "percent": percent,
                 }
             )
-        conclusion = f"结论：{base_name} 相当于 " + " / ".join(self._display_name(item) for item in target_items)
+        if not conclusion:
+            conclusion = f"结论：{base_name} 相当于 " + " / ".join(self._display_name(item) for item in target_items)
         return await self.html_render(
             COMPARE_TEMPLATE,
             {
@@ -277,18 +324,18 @@ class HWInfoPlugin(Star):
         )
 
     @filter.command("cpu")
-    async def cpu_search(self, event: AstrMessageEvent, query: str):
+    async def cpu_search(self, event: AstrMessageEvent, query: str = ""):
         """查询 CPU 型号详细信息，支持模糊搜索。"""
         async for result in self._handle_search(event, "cpu", query, self.cpu_items):
             yield result
 
     @filter.command("gpu")
-    async def gpu_search(self, event: AstrMessageEvent, query: str):
+    async def gpu_search(self, event: AstrMessageEvent, query: str = ""):
         """查询 GPU 型号详细信息，支持模糊搜索。"""
         async for result in self._handle_search(event, "gpu", query, self.gpu_items):
             yield result
 
-    @filter.regex(r".*相当于.*显卡.*|.*显卡.*相当于.*|.*笔电.*台式.*|.*台式.*笔电.*")
+    @filter.regex(r"^(?!\s*gpu\b)(?!\s*显卡天梯图\s*$).*(相当于.*显卡|显卡.*相当于|笔电.*台式|台式.*笔电).*$")
     async def compare_gpu(self, event: AstrMessageEvent):
         """比较笔电/台式显卡性能接近型号。"""
         text = event.message_str
@@ -296,18 +343,20 @@ class HWInfoPlugin(Star):
         target_type = "desktop" if source_type == "laptop" else "laptop"
         matches = [item for item in self._search_items(self.gpu_items, query, limit=20) if item.get("type") == source_type]
         if not matches:
-            yield event.plain_result("未找到用于比较的显卡型号。")
+            yield event.plain_result("未找到比较型号。")
             return
+
         base_item = matches[0]
         target_items = self._find_equivalent_gpus(base_item, target_type)
         if not target_items:
             yield event.plain_result("未找到可比较的目标显卡。")
             return
-        image_url = await self._render_compare_image(base_item, target_items)
+
+        conclusion = f"结论：{base_item.get('name')} 相当于 {target_items[0].get('name')}"
+        image_url = await self._render_compare_image(base_item, target_items, conclusion=conclusion)
         yield event.image_result(image_url)
 
     @filter.command("显卡天梯图")
     async def gpu_rank(self, event: AstrMessageEvent):
         """发送显卡天梯图。"""
-        chain = [Comp.Image.fromFileSystem(str(GPU_RANK_IMAGE))]
-        yield event.chain_result(chain)
+        yield event.image_result(str(GPU_RANK_IMAGE))
