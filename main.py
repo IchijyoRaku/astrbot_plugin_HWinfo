@@ -12,9 +12,10 @@ from astrbot.core.utils.session_waiter import SessionController, session_waiter
 CPU_SINGLE_PATH = Path("data/cpu/r23single.json")
 GPU_PATH = Path("data/gpu/timespy.json")
 GPU_RANK_IMAGE = Path("data/gpu/显卡天梯图.png")
+PLUGIN_VERSION = "0.1"
 
 
-@register("astrbot_plugin_HWinfo", "IchijyoRaku", "硬件信息与性能对比插件", "1.0.0")
+@register("astrbot_plugin_HWinfo", "IchijyoRaku", "硬件信息与性能对比插件", PLUGIN_VERSION)
 class HWInfoPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
@@ -38,10 +39,10 @@ class HWInfoPlugin(Star):
             "intel": "intel ",
             "amd": "amd ",
             "ryzen": "ryzen ",
-            "core ultra": "coreultra",
-            "core": "core",
-            "ultra": "ultra",
-            "super": "super",
+            "core ultra": "core ultra ",
+            "core": "core ",
+            "ultra": "ultra ",
+            "super": "super ",
             "笔记本": "laptop",
             "笔电": "laptop",
             "移动版": "laptop",
@@ -104,7 +105,10 @@ class HWInfoPlugin(Star):
     def _score_candidate(self, query: str, item: dict[str, Any]) -> float:
         query_compact = self._compact(query)
         query_numbers = self._extract_number_tokens(query)
-        query_tokens = [token for token in self._extract_text_tokens(query) if token not in {"cpu", "gpu", "laptop", "desktop", "相当于", "什么", "型号", "查询"}]
+        query_tokens = [
+            token for token in self._extract_text_tokens(query)
+            if token not in {"cpu", "gpu", "laptop", "desktop", "相当于", "什么", "型号", "查询"}
+        ]
         if not query_compact:
             return 0.0
 
