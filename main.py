@@ -54,29 +54,83 @@ class HWInfoPlugin(Star):
     def _normalize_query_model(self, text: str) -> str:
         text = text.lower().strip()
         text = text.replace("cpu", "").replace("gpu", "")
+        text = text.replace("显卡", "").replace("处理器", "")
+        text = text.replace("笔记本", "laptop").replace("笔电", "laptop")
+        text = text.replace("台式", "desktop").replace("桌面", "desktop")
         text = re.sub(r"[^a-z0-9]+", "", text)
         return text
+
+    def _extract_model_core_and_suffix(self, text: str) -> tuple[str, str]:
+        normalized = self._normalize_query_model(text)
+        match = re.search(r"(\d{3,5})([a-z]*)", normalized)
+        if not match:
+            return normalized, ""
+        return match.group(1), match.group(2)
 
     def _extract_strict_model(self, item: dict[str, Any]) -> str:
         name = str(item.get("name", "")).strip()
         return re.sub(r"\s+", "", name).lower()
 
-    def _strict_search_items(self, items: list[dict[str, Any]], query: str) -> list[dict[str, Any]]:
+    def _score_model_match(self, query: str, item: dict[str, Any]) -> float:
         normalized_query = self._normalize_query_model(query)
-        logger.info("开始严格匹配，原始输入=%s，归一化后=%s", query, normalized_query)
-        if not normalized_query:
-            logger.info("严格匹配中止：归一化后的查询为空")
-            return []
+        model = self._extract_strict_model(item)
+        core, suffix = self._extract_model_core_and_suffix(query)
+        score = 0.0
 
-        matches = []
+        if normalized_query == model:
+            score += 1000
+        elif normalized_query in model:
+            score += 300
+
+        if core and core in model:
+            score += 200
+        else:
+            return 0.0
+
+        if suffix:
+            if model.endswith(suffix):
+                score += 500
+            elif suffix in model:
+                score += 150
+            else:
+                score -= 300
+        else:
+            if any(token in model for token in ["ti", "super"]):
+                score -= 120
+
+        normalized_full_query = self._normalize_query_model(query)
+        if "laptop" in normalized_full_query:
+            if item.get("type") == "laptop":
+                score += 250
+            else:
+                score -= 250
+        if "desktop" in normalized_full_query:
+            if item.get("type") == "desktop":
+                score += 250
+            else:
+                score -= 250
+
+        logger.info("候选评分: query=%s item=%s model=%s score=%.2f", query, self._display_name(item), model, score)
+        return score
+
+    def _fuzzy_search_items(self, items: list[dict[str, Any]], query: str) -> list[dict[str, Any]]:
+        logger.info("开始模糊匹配，原始输入=%s，归一化后=%s", query, self._normalize_query_model(query))
+        scored: list[tuple[float, dict[str, Any]]] = []
         for item in items:
-            model = self._extract_strict_model(item)
-            if normalized_query in model:
-                matches.append(item)
-        logger.info("严格匹配完成，命中数量=%s", len(matches))
-        for item in matches[:20]:
-            logger.info("命中候选: %s", self._display_name(item))
-        return matches
+            score = self._score_model_match(query, item)
+            if score > 0:
+                scored.append((score, item))
+        scored.sort(key=lambda x: (-x[0], x[1].get("rank", 999999), self._display_name(x[1])))
+        logger.info("模糊匹配完成，命中数量=%s", len(scored))
+        for score, item in scored[:20]:
+            logger.info("命中候选: %s score=%.2f", self._display_name(item), score)
+        if not scored:
+            return []
+        best_score = scored[0][0]
+        threshold = max(50, best_score - 300)
+        filtered = [item for score, item in scored if score >= threshold]
+        logger.info("候选筛选阈值=%s，筛选后数量=%s", threshold, len(filtered))
+        return filtered
 
     def _format_item_detail(self, category: str, item: dict[str, Any]) -> str:
         rows = []
@@ -116,7 +170,7 @@ class HWInfoPlugin(Star):
                 yield event.plain_result(f"请输入要查询的{category.upper()} 型号。")
             return
 
-        matches = self._strict_search_items(items, query)
+        matches = self._fuzzy_search_items(items, query)
         if not matches:
             logger.info("未找到匹配结果，query=%s", query)
             yield event.plain_result(f"未找到和 {query} 相关的{category.upper()} 型号。")
@@ -176,7 +230,7 @@ class HWInfoPlugin(Star):
         lowered = text.lower().strip()
         source_type = "laptop" if any(token in lowered for token in ["笔电", "笔记本", "laptop", "mobile"]) else "desktop"
         cleaned = lowered
-        for token in ["显卡", "gpu", "相当于", "比较", "对比", "什么", "型号", "对应", "接近", "大概", "约等于", "性能", "台式", "桌面", "笔电", "笔记本"]:
+        for token in ["显卡", "gpu", "相当于", "比较", "对比", "什么", "型号", "对应", "接近", "大概", "约等于", "性能", "台式", "桌面"]:
             cleaned = cleaned.replace(token, " ")
         cleaned = re.sub(r"\s+", " ", cleaned).strip()
         logger.info("解析显卡对比请求，source_type=%s，query=%s", source_type, cleaned)
@@ -231,13 +285,13 @@ class HWInfoPlugin(Star):
 
     @filter.command("cpu")
     async def cpu_search(self, event: AstrMessageEvent, query: str = ""):
-        """查询 CPU 型号详细信息，严格匹配型号。"""
+        """查询 CPU 型号详细信息，模糊匹配并列出候选。"""
         async for result in self._handle_search(event, "cpu", query, self.cpu_items):
             yield result
 
     @filter.command("gpu")
     async def gpu_search(self, event: AstrMessageEvent, query: str = ""):
-        """查询 GPU 型号详细信息，严格匹配型号。"""
+        """查询 GPU 型号详细信息，模糊匹配并列出候选。"""
         async for result in self._handle_search(event, "gpu", query, self.gpu_items):
             yield result
 
@@ -249,7 +303,7 @@ class HWInfoPlugin(Star):
         target_type = "desktop" if source_type == "laptop" else "laptop"
         source_candidates = [item for item in self.gpu_items if item.get("type") == source_type]
         target_candidates = [item for item in self.gpu_items if item.get("type") == target_type and item.get("score")]
-        base_matches = self._strict_search_items(source_candidates, query)
+        base_matches = self._fuzzy_search_items(source_candidates, query)
         if not base_matches:
             logger.info("显卡对比未找到基准型号，query=%s", query)
             yield event.plain_result("未找到比较型号。")
