@@ -155,8 +155,8 @@ class HWInfoPlugin(Star):
             field_pairs = [
                 ("厂商", "vendor"),
                 ("型号", None),
-                ("单核跑分", "score"),
-                ("多核跑分", None),
+                ("R23单核", "score"),
+                ("R23多核", None),
                 ("核心数", "cores"),
                 ("线程数", "threads"),
                 ("基准频率", "base_clock"),
@@ -182,10 +182,10 @@ class HWInfoPlugin(Star):
             if label == "型号" and category == "cpu":
                 rows.append(f"型号：{self._display_name(item).replace(vendor + ' ', '', 1) if vendor else self._display_name(item)}")
                 continue
-            if label == "多核跑分" and category == "cpu":
+            if label == "R23多核" and category == "cpu":
                 multi_score = self._find_cpu_multi_score(item)
                 if multi_score is not None:
-                    rows.append(f"多核跑分：{multi_score}")
+                    rows.append(f"R23多核：{multi_score}")
                 continue
             value = item.get(key) if key else None
             if value is None or value == "Unknown":
@@ -254,14 +254,13 @@ class HWInfoPlugin(Star):
             logger.info("用户完成选择，user_id=%s，item=%s", user_id, self._display_name(item))
             controller.stop()
 
+        event.stop_event()
         try:
             await choose_waiter(event)
         except TimeoutError:
             self.pending_choices.pop(user_id, None)
             logger.info("候选选择超时，user_id=%s", user_id)
             yield event.plain_result("选择已超时，请重新查询。")
-        finally:
-            event.stop_event()
 
     def _extract_type_and_query(self, text: str) -> tuple[str, str]:
         lowered = text.lower().strip()
