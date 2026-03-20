@@ -1,10 +1,10 @@
 import json
 import re
-from pathlib import Path
 from typing import Any
+from pathlib import Path
 
 import astrbot.api.message_components as Comp
-from astrbot.api import logger
+from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
 from astrbot.core.utils.session_waiter import SessionController, session_waiter
@@ -17,11 +17,14 @@ PLUGIN_VERSION = "0.1"
 
 @register("astrbot_plugin_HWinfo", "IchijyoRaku", "硬件信息与性能对比插件", PLUGIN_VERSION)
 class HWInfoPlugin(Star):
-    def __init__(self, context: Context):
+    def __init__(self, context: Context, config: AstrBotConfig | None = None):
         super().__init__(context)
+        self.context = context
+        self.config = config or context.get_config()
         self.cpu_items = self._load_items(CPU_SINGLE_PATH)
         self.gpu_items = self._load_items(GPU_PATH)
         self.pending_choices: dict[str, dict[str, Any]] = {}
+        self.response_pattern = re.compile(r"\{.*\}|\[.*\]", re.S)
 
     def _load_items(self, path: Path) -> list[dict[str, Any]]:
         if not path.exists():
@@ -29,155 +32,30 @@ class HWInfoPlugin(Star):
             return []
         return json.loads(path.read_text(encoding="utf-8")).get("items", [])
 
-    def _normalize_text(self, text: str) -> str:
-        text = text.lower().strip()
-        replacements = {
-            "geforce": "",
-            "radeon": "",
-            "graphics": "",
-            "processor": "",
-            "intel": "intel ",
-            "amd": "amd ",
-            "ryzen": "ryzen ",
-            "core ultra": "core ultra ",
-            "core": "core ",
-            "ultra": "ultra ",
-            "super": "super ",
-            "笔记本": "laptop",
-            "笔电": "laptop",
-            "移动版": "laptop",
-            "移动端": "laptop",
-            "台式": "desktop",
-            "桌面": "desktop",
-            "独显": "gpu",
-            "cpi": "cpu",
-            "cup": "cpu",
-        }
-        for src, dst in replacements.items():
-            text = text.replace(src, dst)
-        text = re.sub(r"[^a-z0-9\u4e00-\u9fa5]+", " ", text)
-        return re.sub(r"\s+", " ", text).strip()
-
-    def _compact(self, text: str) -> str:
-        return self._normalize_text(text).replace(" ", "")
-
     def _display_name(self, item: dict[str, Any]) -> str:
         parts = [item.get("vendor"), item.get("series"), item.get("name")]
         return " ".join(str(part) for part in parts if part and part != "Unknown")
 
-    def _extract_number_tokens(self, text: str) -> list[str]:
-        normalized = self._normalize_text(text)
-        return re.findall(r"\d{3,5}[a-z]{0,3}", normalized)
+    def _resolve_image_path(self, path: Path | str) -> str:
+        return str((Path(__file__).parent / Path(path)).resolve())
 
-    def _extract_text_tokens(self, text: str) -> list[str]:
-        normalized = self._normalize_text(text)
-        return re.findall(r"[a-z]+|\d{3,5}[a-z]*", normalized)
+    def _image_chain(self, path: Path | str):
+        return [Comp.Image.fromFileSystem(self._resolve_image_path(path))]
 
-    def _item_aliases(self, item: dict[str, Any]) -> list[str]:
-        vendor = str(item.get("vendor", ""))
-        series = str(item.get("series", ""))
-        name = str(item.get("name", ""))
-        aliases = {
-            self._display_name(item),
-            f"{series} {name}".strip(),
-            f"{vendor} {series} {name}".strip(),
-            name,
-            self._compact(name),
-            self._compact(f"{series} {name}"),
+    async def _send_rank_image(self, event: AstrMessageEvent):
+        yield event.chain_result(self._image_chain(GPU_RANK_IMAGE))
+
+    def _item_brief(self, item: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "name": self._display_name(item),
+            "vendor": item.get("vendor"),
+            "series": item.get("series"),
+            "model": item.get("name"),
+            "type": item.get("type"),
+            "generation": item.get("generation"),
+            "score": item.get("score"),
+            "release_date": item.get("release_date"),
         }
-        if vendor.upper() == "AMD" and series.startswith("Ryzen"):
-            series_level = series.replace("Ryzen", "").strip()
-            aliases.add(f"ryzen {series_level} {name}".strip())
-            aliases.add(f"r{series_level} {name}".strip())
-            aliases.add(f"{series_level} {name}".strip())
-            aliases.add(f"{series_level}{name}".strip())
-            aliases.add(name.replace(" ", ""))
-        if vendor.upper() == "INTEL" and series.startswith("Core"):
-            compact_name = name.replace(" ", "")
-            aliases.add(compact_name)
-            aliases.add(f"{series} {compact_name}".strip())
-            if series.startswith("Core Ultra"):
-                aliases.add(f"ultra {compact_name}".strip())
-            else:
-                aliases.add(f"{series.replace('Core', 'i').strip()} {compact_name}".strip())
-        return [alias for alias in aliases if alias]
-
-    def _score_candidate(self, query: str, item: dict[str, Any]) -> float:
-        query_compact = self._compact(query)
-        query_numbers = self._extract_number_tokens(query)
-        query_tokens = [
-            token for token in self._extract_text_tokens(query)
-            if token not in {"cpu", "gpu", "laptop", "desktop", "相当于", "什么", "型号", "查询"}
-        ]
-        if not query_compact:
-            return 0.0
-
-        aliases = self._item_aliases(item)
-        best_score = 0.0
-        normalized_query = self._normalize_text(query)
-        for alias in aliases:
-            alias_compact = self._compact(alias)
-            alias_tokens = self._extract_text_tokens(alias)
-            score = 0.0
-
-            if query_compact == alias_compact:
-                score += 260
-            elif query_compact in alias_compact:
-                score += 220
-            elif alias_compact in query_compact:
-                score += 120
-
-            if query_numbers:
-                matched_numbers = 0
-                for number in query_numbers:
-                    if number in alias_compact:
-                        score += 120
-                        matched_numbers += 1
-                if matched_numbers == 0:
-                    continue
-                score += matched_numbers * 30
-
-            for token in query_tokens:
-                if token in alias_compact:
-                    score += 35
-                elif any(token == alias_token for alias_token in alias_tokens):
-                    score += 25
-
-            if normalized_query.startswith("cpu"):
-                score += 5
-            if "laptop" in normalized_query and item.get("type") == "laptop":
-                score += 30
-            if "desktop" in normalized_query and item.get("type") == "desktop":
-                score += 30
-
-            if score > best_score:
-                best_score = score
-        return best_score
-
-    def _search_items(self, items: list[dict[str, Any]], query: str, limit: int = 8) -> list[dict[str, Any]]:
-        scored: list[tuple[float, dict[str, Any]]] = []
-        for item in items:
-            score = self._score_candidate(query, item)
-            if score > 0:
-                scored.append((score, item))
-        scored.sort(key=lambda x: (-x[0], x[1].get("rank", 999999), self._display_name(x[1])))
-        if not scored:
-            return []
-        best_score = scored[0][0]
-        threshold = max(60, best_score * 0.6)
-        candidates = [item for score, item in scored if score >= threshold]
-        if candidates:
-            return candidates[:limit]
-
-        query_numbers = self._extract_number_tokens(query)
-        if query_numbers:
-            fallback = [
-                item for _, item in scored
-                if all(number in self._compact(self._display_name(item)) for number in query_numbers)
-            ]
-            if fallback:
-                return fallback[:limit]
-        return [item for _, item in scored[:limit]]
 
     def _format_item_detail(self, category: str, item: dict[str, Any]) -> str:
         rows = []
@@ -203,14 +81,53 @@ class HWInfoPlugin(Star):
             rows.append(f"{label}：{value}")
         return f"{category.upper()} 详细信息\n" + "\n".join(rows)
 
-    def _resolve_image_path(self, path: Path | str) -> str:
-        return str((Path(__file__).parent / Path(path)).resolve())
+    async def _get_provider_id(self, event: AstrMessageEvent) -> str:
+        provider_id = self.config.get("text_provider_id", "") if self.config else ""
+        if provider_id:
+            return provider_id
+        return await self.context.get_current_chat_provider_id(umo=event.unified_msg_origin)
 
-    def _image_chain(self, path: Path | str):
-        return [Comp.Image.fromFileSystem(self._resolve_image_path(path))]
+    async def _llm_json(self, event: AstrMessageEvent, prompt: str) -> Any:
+        llm_resp = await self.context.llm_generate(
+            chat_provider_id=await self._get_provider_id(event),
+            prompt=prompt,
+        )
+        text_resp = llm_resp.completion_text.strip()
+        matches = self.response_pattern.findall(text_resp)
+        payload = matches[0] if matches else text_resp
+        return json.loads(payload)
 
-    async def _send_rank_image(self, event: AstrMessageEvent):
-        yield event.chain_result(self._image_chain(GPU_RANK_IMAGE))
+    async def _llm_pick_candidates(
+        self,
+        event: AstrMessageEvent,
+        category: str,
+        query: str,
+        items: list[dict[str, Any]],
+        limit: int = 8,
+    ) -> list[dict[str, Any]]:
+        candidate_pool = [self._item_brief(item) for item in items[:3000]]
+        prompt = f"""
+你是硬件检索助手。用户想查询一个 {category.upper()} 型号。
+你的任务不是自由回答，而是从候选数据中挑出最可能相关的候选。
+
+用户输入：{query}
+候选数据：{json.dumps(candidate_pool, ensure_ascii=False)}
+
+规则：
+1. 优先根据型号数字、后缀、品牌、系列来筛选。
+2. 类似 5090 应返回 5090、5090D、5090DD 这类候选。
+3. 类似 9700x 应返回 9700X、r7 9700x、Ryzen 7 9700X 对应候选。
+4. 最多返回 {limit} 个候选。
+5. 只返回 JSON 数组，数组元素是候选 name 字符串，不要返回任何解释。
+
+示例输出：
+["NVIDIA GeForce RTX 5090", "NVIDIA GeForce RTX 5090 D"]
+"""
+        selected_names = await self._llm_json(event, prompt)
+        if not isinstance(selected_names, list):
+            return []
+        name_set = {str(name).strip() for name in selected_names}
+        return [item for item in items if self._display_name(item) in name_set][:limit]
 
     async def _handle_search(self, event: AstrMessageEvent, category: str, query: str, items: list[dict[str, Any]]):
         query = query.strip()
@@ -222,7 +139,13 @@ class HWInfoPlugin(Star):
                 yield event.plain_result(f"请输入要查询的{category.upper()} 型号。")
             return
 
-        matches = self._search_items(items, query)
+        try:
+            matches = await self._llm_pick_candidates(event, category, query, items)
+        except Exception as exc:
+            logger.error("LLM 候选筛选失败", exc_info=True)
+            yield event.plain_result(f"查询失败：{exc}")
+            return
+
         if not matches:
             yield event.plain_result(f"未找到和 {query} 相关的{category.upper()} 型号。")
             return
@@ -269,53 +192,29 @@ class HWInfoPlugin(Star):
         finally:
             event.stop_event()
 
-    def _extract_type_and_query(self, text: str) -> tuple[str, str]:
-        lowered = self._normalize_text(text)
-        source_type = "laptop" if "laptop" in lowered else "desktop"
-        for token in ["显卡", "gpu", "相当于", "比较", "对比", "什么", "型号", "对应", "接近", "大概", "约等于", "性能"]:
-            lowered = lowered.replace(token, " ")
-        lowered = re.sub(r"\s+", " ", lowered).strip()
-        return source_type, lowered
+    async def _llm_pick_equivalent(self, event: AstrMessageEvent, base_item: dict[str, Any], target_items: list[dict[str, Any]]) -> dict[str, Any] | None:
+        prompt = f"""
+你是显卡性能对比助手。请从候选中选出与基准显卡性能最接近的一个目标显卡。
 
-    def _gpu_series_rank(self, item: dict[str, Any]) -> int | None:
-        match = re.search(r"(\d{4})", str(item.get("name", "")))
-        if not match:
+基准显卡：{json.dumps(self._item_brief(base_item), ensure_ascii=False)}
+候选显卡：{json.dumps([self._item_brief(item) for item in target_items], ensure_ascii=False)}
+
+规则：
+1. 优先选择与基准显卡同系的显卡，例如 50 系优先匹配 50 系。
+2. 如果同系里最近的显卡跑分差距超过 10%，再降级考虑 40 系、30 系、20 系。
+3. 只返回一个 JSON 对象，格式：{{"name": "候选显卡全名"}}
+4. 不要返回解释。
+"""
+        result = await self._llm_json(event, prompt)
+        if not isinstance(result, dict):
             return None
-        value = int(match.group(1))
-        return value // 1000
+        selected_name = str(result.get("name", "")).strip()
+        for item in target_items:
+            if self._display_name(item) == selected_name:
+                return item
+        return None
 
-    def _same_series_candidates(self, candidates: list[dict[str, Any]], base_series: int) -> list[dict[str, Any]]:
-        return [item for item in candidates if self._gpu_series_rank(item) == base_series]
-
-    def _pick_generation_equivalent(self, base_item: dict[str, Any], candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
-        if not candidates:
-            return None
-        base_score = base_item["score"]
-        base_series = self._gpu_series_rank(base_item)
-        if base_series is None:
-            return min(candidates, key=lambda item: abs(item["score"] - base_score))
-
-        ordered_series = [series for series in range(base_series, 1, -1)]
-        for series in ordered_series:
-            series_candidates = self._same_series_candidates(candidates, series)
-            if not series_candidates:
-                continue
-            best = min(series_candidates, key=lambda item: abs(item["score"] - base_score))
-            diff_ratio = abs(best["score"] - base_score) / max(base_score, 1)
-            if diff_ratio <= 0.10:
-                return best
-        return min(candidates, key=lambda item: abs(item["score"] - base_score))
-
-    def _find_equivalent_gpus(self, base_item: dict[str, Any], target_type: str) -> list[dict[str, Any]]:
-        candidates = [
-            item for item in self.gpu_items
-            if item.get("type") == target_type and item.get("generation")
-        ]
-        match = self._pick_generation_equivalent(base_item, candidates)
-        return [match] if match else []
-
-    def _format_compare_result(self, base_item: dict[str, Any], target_items: list[dict[str, Any]]) -> str:
-        target_item = target_items[0]
+    def _format_compare_result(self, base_item: dict[str, Any], target_item: dict[str, Any]) -> str:
         diff_ratio = (target_item["score"] - base_item["score"]) / max(base_item["score"], 1)
         diff_percent = f"{diff_ratio * 100:+.1f}%"
         return "\n".join(
@@ -329,15 +228,20 @@ class HWInfoPlugin(Star):
             ]
         )
 
+    def _extract_type_and_query(self, text: str) -> tuple[str, str]:
+        lowered = text.lower().strip()
+        source_type = "laptop" if any(token in lowered for token in ["笔电", "笔记本", "laptop", "mobile"]) else "desktop"
+        return source_type, text.strip()
+
     @filter.command("cpu")
     async def cpu_search(self, event: AstrMessageEvent, query: str = ""):
-        """查询 CPU 型号详细信息，支持模糊搜索。"""
+        """查询 CPU 型号详细信息，支持 LLM 识别。"""
         async for result in self._handle_search(event, "cpu", query, self.cpu_items):
             yield result
 
     @filter.command("gpu")
     async def gpu_search(self, event: AstrMessageEvent, query: str = ""):
-        """查询 GPU 型号详细信息，支持模糊搜索。"""
+        """查询 GPU 型号详细信息，支持 LLM 识别。"""
         async for result in self._handle_search(event, "gpu", query, self.gpu_items):
             yield result
 
@@ -347,18 +251,20 @@ class HWInfoPlugin(Star):
         text = event.message_str
         source_type, query = self._extract_type_and_query(text)
         target_type = "desktop" if source_type == "laptop" else "laptop"
-        matches = [item for item in self._search_items(self.gpu_items, query, limit=20) if item.get("type") == source_type]
-        if not matches:
+
+        source_matches = await self._llm_pick_candidates(event, "gpu", query, [item for item in self.gpu_items if item.get("type") == source_type], limit=5)
+        if not source_matches:
             yield event.plain_result("未找到比较型号。")
             return
+        base_item = source_matches[0]
 
-        base_item = matches[0]
-        target_items = self._find_equivalent_gpus(base_item, target_type)
-        if not target_items:
+        target_candidates = [item for item in self.gpu_items if item.get("type") == target_type and item.get("score")]
+        target_item = await self._llm_pick_equivalent(event, base_item, target_candidates)
+        if not target_item:
             yield event.plain_result("未找到可比较的目标显卡。")
             return
 
-        yield event.plain_result(self._format_compare_result(base_item, target_items))
+        yield event.plain_result(self._format_compare_result(base_item, target_item))
 
     @filter.command("显卡天梯图")
     async def gpu_rank(self, event: AstrMessageEvent):
