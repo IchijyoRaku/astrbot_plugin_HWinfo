@@ -1,9 +1,9 @@
 import json
 import re
-from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
+import astrbot.api.message_components as Comp
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
@@ -11,27 +11,7 @@ from astrbot.core.utils.session_waiter import SessionController, session_waiter
 
 CPU_SINGLE_PATH = Path("data/cpu/r23single.json")
 GPU_PATH = Path("data/gpu/timespy.json")
-QUERY_STOPWORDS = {
-    "cpu",
-    "gpu",
-    "显卡",
-    "处理器",
-    "查询",
-    "查",
-    "看",
-    "参数",
-    "型号",
-    "什么",
-    "多少",
-    "对比",
-    "比较",
-    "相当于",
-    "大概",
-    "约等于",
-    "对应",
-    "接近",
-    "的",
-}
+GPU_RANK_IMAGE = Path("data/gpu/显卡天梯图.png")
 
 
 @register("astrbot_plugin_HWinfo", "IchijyoRaku", "硬件信息与性能对比插件", "1.0.0")
@@ -55,14 +35,13 @@ class HWInfoPlugin(Star):
             "radeon": "",
             "graphics": "",
             "processor": "",
-            "intel": "i",
-            "amd": "amd",
-            "ryzen": "r",
-            "core": "i",
-            "ultra": "u",
-            "super": "s",
-            "ti super": "ti",
-            "ti": "ti",
+            "intel": "",
+            "amd": "",
+            "ryzen": "ryzen",
+            "core ultra": "coreultra",
+            "core": "core",
+            "ultra": "ultra",
+            "super": "super",
             "笔记本": "laptop",
             "笔电": "laptop",
             "移动版": "laptop",
@@ -76,110 +55,84 @@ class HWInfoPlugin(Star):
         for src, dst in replacements.items():
             text = text.replace(src, dst)
         text = re.sub(r"[^a-z0-9\u4e00-\u9fa5]+", " ", text)
-        text = re.sub(r"\s+", " ", text).strip()
-        return text
+        return re.sub(r"\s+", " ", text).strip()
 
-    def _compact_text(self, text: str) -> str:
+    def _compact(self, text: str) -> str:
         return self._normalize_text(text).replace(" ", "")
-
-    def _extract_number_tokens(self, text: str) -> list[str]:
-        return re.findall(r"\d{3,5}[a-z]{0,3}", self._normalize_text(text))
-
-    def _extract_query_tokens(self, text: str) -> list[str]:
-        normalized = self._normalize_text(text)
-        raw_tokens = re.findall(r"[a-z]+\d*[a-z]*|\d{3,5}[a-z]*", normalized)
-        merged: list[str] = []
-        i = 0
-        while i < len(raw_tokens):
-            token = raw_tokens[i]
-            next_token = raw_tokens[i + 1] if i + 1 < len(raw_tokens) else ""
-            if token in {"rtx", "gtx", "rx", "i", "r", "u"} and next_token and re.fullmatch(r"\d{3,5}[a-z]{0,3}", next_token):
-                merged.append(f"{token}{next_token}")
-                i += 2
-                continue
-            if token in QUERY_STOPWORDS:
-                i += 1
-                continue
-            merged.append(token)
-            i += 1
-        ordered: list[str] = []
-        for token in merged:
-            if token and token not in ordered:
-                ordered.append(token)
-        return ordered
-
-    def _build_search_blob(self, item: dict[str, Any]) -> dict[str, Any]:
-        display_name = self._display_name(item)
-        name = str(item.get("name", ""))
-        vendor = str(item.get("vendor", ""))
-        series = str(item.get("series", ""))
-        generation = str(item.get("generation", ""))
-        item_type = str(item.get("type", ""))
-        full_text = " ".join(part for part in [vendor, series, name, generation, item_type, display_name] if part and part != "Unknown")
-        normalized = self._normalize_text(full_text)
-        compact = normalized.replace(" ", "")
-        tokens = self._extract_query_tokens(full_text)
-        numbers = self._extract_number_tokens(full_text)
-        return {
-            "display_name": display_name,
-            "normalized": normalized,
-            "compact": compact,
-            "tokens": tokens,
-            "numbers": numbers,
-        }
 
     def _display_name(self, item: dict[str, Any]) -> str:
         parts = [item.get("vendor"), item.get("series"), item.get("name")]
-        return " ".join(str(p) for p in parts if p and p != "Unknown")
+        return " ".join(str(part) for part in parts if part and part != "Unknown")
+
+    def _extract_number_tokens(self, text: str) -> list[str]:
+        normalized = self._normalize_text(text)
+        return re.findall(r"\d{3,5}[a-z]{0,3}", normalized)
+
+    def _extract_text_tokens(self, text: str) -> list[str]:
+        normalized = self._normalize_text(text)
+        return re.findall(r"[a-z]+|\d{3,5}[a-z]*", normalized)
+
+    def _item_aliases(self, item: dict[str, Any]) -> list[str]:
+        vendor = str(item.get("vendor", ""))
+        series = str(item.get("series", ""))
+        name = str(item.get("name", ""))
+        aliases = {
+            self._display_name(item),
+            f"{series} {name}".strip(),
+            f"{vendor} {series} {name}".strip(),
+            name,
+        }
+        if vendor == "AMD" and series.startswith("Ryzen"):
+            aliases.add(f"{series.replace('Ryzen ', 'r')} {name}".strip())
+            aliases.add(f"{series.replace('Ryzen ', '')} {name}".strip())
+        if vendor == "Intel" and series.startswith("Core"):
+            aliases.add(f"{series.replace('Core ', 'i')} {name}".strip())
+            aliases.add(f"{series.replace('Core Ultra ', 'ultra ')} {name}".strip())
+        return [alias for alias in aliases if alias]
 
     def _score_candidate(self, query: str, item: dict[str, Any]) -> float:
-        blob = self._build_search_blob(item)
-        query_text = self._normalize_text(query)
-        query_compact = self._compact_text(query)
-        query_tokens = self._extract_query_tokens(query)
+        query_compact = self._compact(query)
         query_numbers = self._extract_number_tokens(query)
-        if not query_text:
+        query_tokens = [token for token in self._extract_text_tokens(query) if token not in {"cpu", "gpu", "laptop", "desktop", "相当于", "什么", "型号", "查询"}]
+        if not query_compact:
             return 0.0
 
-        score = 0.0
-        if query_compact and query_compact in blob["compact"]:
-            score += 200
+        aliases = self._item_aliases(item)
+        best_score = 0.0
+        for alias in aliases:
+            alias_compact = self._compact(alias)
+            alias_tokens = self._extract_text_tokens(alias)
+            score = 0.0
 
-        if query_numbers:
-            matched_numbers = 0
-            for number in query_numbers:
-                if any(number in candidate for candidate in blob["numbers"]):
-                    score += 120
-                    matched_numbers += 1
-            if matched_numbers == 0:
-                return 0.0
-            score += matched_numbers * 20
+            if query_compact == alias_compact:
+                score += 200
+            elif query_compact in alias_compact:
+                score += 160
 
-        for token in query_tokens:
-            if token in blob["tokens"]:
-                score += 45
-                continue
-            if token in blob["compact"]:
+            if query_numbers:
+                matched_numbers = 0
+                for number in query_numbers:
+                    if number in alias_compact:
+                        score += 100
+                        matched_numbers += 1
+                if matched_numbers == 0:
+                    continue
+                score += matched_numbers * 20
+
+            for token in query_tokens:
+                if token in alias_compact:
+                    score += 25
+                elif any(token == alias_token for alias_token in alias_tokens):
+                    score += 20
+
+            if "laptop" in self._normalize_text(query) and item.get("type") == "laptop":
                 score += 30
-                continue
-            best_ratio = 0.0
-            for candidate in blob["tokens"]:
-                ratio = SequenceMatcher(None, token, candidate).ratio()
-                if ratio > best_ratio:
-                    best_ratio = ratio
-            if best_ratio >= 0.88:
-                score += 24
-            elif best_ratio >= 0.75:
-                score += 12
+            if "desktop" in self._normalize_text(query) and item.get("type") == "desktop":
+                score += 30
 
-        overall_ratio = SequenceMatcher(None, query_compact, blob["compact"]).ratio() if query_compact else 0.0
-        score += overall_ratio * 20
-
-        if "laptop" in query_text and item.get("type") == "laptop":
-            score += 35
-        if "desktop" in query_text and item.get("type") == "desktop":
-            score += 35
-        return score
+            if score > best_score:
+                best_score = score
+        return best_score
 
     def _search_items(self, items: list[dict[str, Any]], query: str, limit: int = 8) -> list[dict[str, Any]]:
         scored: list[tuple[float, dict[str, Any]]] = []
@@ -191,7 +144,7 @@ class HWInfoPlugin(Star):
         if not scored:
             return []
         best_score = scored[0][0]
-        threshold = max(25, best_score * 0.65)
+        threshold = max(80, best_score * 0.7)
         return [item for score, item in scored if score >= threshold][:limit]
 
     def _format_item_detail(self, category: str, item: dict[str, Any]) -> str:
@@ -218,23 +171,21 @@ class HWInfoPlugin(Star):
             rows.append(f"{label}：{value}")
         return f"{category.upper()} 详细信息\n" + "\n".join(rows)
 
-    def _format_rank_summary(self) -> str:
-        top_items = sorted(
-            [item for item in self.gpu_items if item.get("score")],
-            key=lambda item: item["score"],
-            reverse=True,
-        )[:10]
-        lines = ["显卡性能榜单（前 10）"]
-        for idx, item in enumerate(top_items, start=1):
-            lines.append(f"{idx}. {self._display_name(item)}｜{item.get('score', '-')}")
-        lines.append("提示：发送 gpu 型号 可查询具体参数。")
-        return "\n".join(lines)
+    def _resolve_image_path(self, path: Path | str) -> str:
+        return str((Path(__file__).parent / Path(path)).resolve())
+
+    def _image_chain(self, path: Path | str):
+        return [Comp.Image.fromFileSystem(self._resolve_image_path(path))]
+
+    async def _send_rank_image(self, event: AstrMessageEvent):
+        yield event.chain_result(self._image_chain(GPU_RANK_IMAGE))
 
     async def _handle_search(self, event: AstrMessageEvent, category: str, query: str, items: list[dict[str, Any]]):
         query = query.strip()
         if not query:
             if category == "gpu":
-                yield event.plain_result(self._format_rank_summary())
+                async for result in self._send_rank_image(event):
+                    yield result
             else:
                 yield event.plain_result(f"请输入要查询的{category.upper()} 型号。")
             return
@@ -289,55 +240,39 @@ class HWInfoPlugin(Star):
     def _extract_type_and_query(self, text: str) -> tuple[str, str]:
         lowered = self._normalize_text(text)
         source_type = "laptop" if "laptop" in lowered else "desktop"
-        for token in ["显卡", "gpu", "相当于", "比较", "对比", "什么", "型号", "对应", "接近", "大概", "约等于"]:
+        for token in ["显卡", "gpu", "相当于", "比较", "对比", "什么", "型号", "对应", "接近", "大概", "约等于", "性能"]:
             lowered = lowered.replace(token, " ")
         lowered = re.sub(r"\s+", " ", lowered).strip()
         return source_type, lowered
 
-    def _extract_gpu_rank(self, item: dict[str, Any]) -> int | None:
-        match = re.search(r"(\d{3,4})", str(item.get("name", "")))
+    def _gpu_series_rank(self, item: dict[str, Any]) -> int | None:
+        match = re.search(r"(\d{4})", str(item.get("name", "")))
         if not match:
             return None
-        return int(match.group(1))
+        value = int(match.group(1))
+        return value // 1000
 
-    def _gpu_generation_priority(self, item: dict[str, Any]) -> int:
-        rank = self._extract_gpu_rank(item)
-        if rank is None:
-            return -1
-        return rank // 1000 if rank >= 1000 else rank // 100
-
-    def _prefer_same_vendor(self, base_item: dict[str, Any], candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        same_vendor = [item for item in candidates if item.get("vendor") == base_item.get("vendor")]
-        return same_vendor or candidates
+    def _same_series_candidates(self, candidates: list[dict[str, Any]], base_series: int) -> list[dict[str, Any]]:
+        return [item for item in candidates if self._gpu_series_rank(item) == base_series]
 
     def _pick_generation_equivalent(self, base_item: dict[str, Any], candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
         if not candidates:
             return None
-        preferred = self._prefer_same_vendor(base_item, candidates)
         base_score = base_item["score"]
-        base_generation = self._gpu_generation_priority(base_item)
-        grouped: dict[int, list[dict[str, Any]]] = {}
-        for item in preferred:
-            generation = self._gpu_generation_priority(item)
-            if generation < 0:
-                continue
-            grouped.setdefault(generation, []).append(item)
+        base_series = self._gpu_series_rank(base_item)
+        if base_series is None:
+            return min(candidates, key=lambda item: abs(item["score"] - base_score))
 
-        ordered_generations: list[int] = []
-        if base_generation >= 0:
-            ordered_generations.append(base_generation)
-        ordered_generations.extend(g for g in sorted(grouped.keys(), reverse=True) if g not in ordered_generations)
-
-        for generation in ordered_generations:
-            generation_items = grouped.get(generation, [])
-            if not generation_items:
+        ordered_series = [series for series in range(base_series, 1, -1)]
+        for series in ordered_series:
+            series_candidates = self._same_series_candidates(candidates, series)
+            if not series_candidates:
                 continue
-            best = min(generation_items, key=lambda item: abs(item["score"] - base_score))
+            best = min(series_candidates, key=lambda item: abs(item["score"] - base_score))
             diff_ratio = abs(best["score"] - base_score) / max(base_score, 1)
             if diff_ratio <= 0.10:
                 return best
-
-        return min(preferred, key=lambda item: abs(item["score"] - base_score))
+        return min(candidates, key=lambda item: abs(item["score"] - base_score))
 
     def _find_equivalent_gpus(self, base_item: dict[str, Any], target_type: str) -> list[dict[str, Any]]:
         candidates = [
@@ -348,20 +283,19 @@ class HWInfoPlugin(Star):
         return [match] if match else []
 
     def _format_compare_result(self, base_item: dict[str, Any], target_items: list[dict[str, Any]]) -> str:
-        base_name = self._display_name(base_item)
         target_item = target_items[0]
         diff_ratio = (target_item["score"] - base_item["score"]) / max(base_item["score"], 1)
         diff_percent = f"{diff_ratio * 100:+.1f}%"
-        lines = [
-            "显卡性能对比",
-            f"结论：{base_name} ≈ {self._display_name(target_item)}",
-            f"基准跑分：{base_item['score']}",
-            f"对比跑分：{target_item['score']}",
-            f"性能差距：{diff_percent}",
-            f"基准类型：{base_item.get('type', '-')}",
-            f"对比类型：{target_item.get('type', '-')}",
-        ]
-        return "\n".join(lines)
+        return "\n".join(
+            [
+                "显卡性能对比",
+                f"基准型号：{self._display_name(base_item)}",
+                f"对比型号：{self._display_name(target_item)}",
+                f"基准跑分：{base_item['score']}",
+                f"对比跑分：{target_item['score']}",
+                f"性能差距：{diff_percent}",
+            ]
+        )
 
     @filter.command("cpu")
     async def cpu_search(self, event: AstrMessageEvent, query: str = ""):
@@ -383,13 +317,6 @@ class HWInfoPlugin(Star):
         target_type = "desktop" if source_type == "laptop" else "laptop"
         matches = [item for item in self._search_items(self.gpu_items, query, limit=20) if item.get("type") == source_type]
         if not matches:
-            query_numbers = self._extract_number_tokens(query)
-            if query_numbers:
-                matches = [
-                    item for item in self.gpu_items
-                    if item.get("type") == source_type and any(number in self._build_search_blob(item)["compact"] for number in query_numbers)
-                ]
-        if not matches:
             yield event.plain_result("未找到比较型号。")
             return
 
@@ -403,5 +330,6 @@ class HWInfoPlugin(Star):
 
     @filter.command("显卡天梯图")
     async def gpu_rank(self, event: AstrMessageEvent):
-        """发送显卡榜单摘要。"""
-        yield event.plain_result(self._format_rank_summary())
+        """发送显卡天梯图。"""
+        async for result in self._send_rank_image(event):
+            yield result
