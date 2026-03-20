@@ -51,9 +51,6 @@ class HWInfoPlugin(Star):
     def _normalize_query_model(self, text: str) -> str:
         text = text.lower().strip()
         text = text.replace("cpu", "").replace("gpu", "")
-        text = text.replace("显卡", "").replace("处理器", "")
-        text = text.replace("笔记本", "").replace("笔电", "")
-        text = text.replace("台式", "").replace("桌面", "")
         text = re.sub(r"[^a-z0-9]+", "", text)
         return text
 
