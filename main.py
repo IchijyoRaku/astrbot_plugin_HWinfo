@@ -3,6 +3,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+import astrbot.api.message_components as Comp
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
@@ -173,8 +174,14 @@ class HWInfoPlugin(Star):
             options={},
         )
 
+    def _resolve_image_path(self, path: Path | str) -> str:
+        return str((Path(__file__).parent / Path(path)).resolve())
+
+    def _image_chain(self, path: Path | str):
+        return [Comp.Image.fromFileSystem(self._resolve_image_path(path))]
+
     async def _send_rank_image(self, event: AstrMessageEvent):
-        yield event.image_result(str(GPU_RANK_IMAGE))
+        yield event.chain_result(self._image_chain(GPU_RANK_IMAGE))
 
     async def _handle_search(self, event: AstrMessageEvent, category: str, query: str, items: list[dict[str, Any]]):
         query = query.strip()
@@ -193,7 +200,7 @@ class HWInfoPlugin(Star):
 
         if len(matches) == 1:
             image_url = await self._render_detail_image(category, matches[0])
-            yield event.image_result(image_url)
+            yield event.chain_result([Comp.Image.fromURL(image_url)])
             return
 
         user_id = str(event.get_sender_id())
@@ -223,7 +230,7 @@ class HWInfoPlugin(Star):
                 return
             item = candidates[index]
             image_url = await self._render_detail_image(category, item)
-            await next_event.send(next_event.image_result(image_url))
+            await next_event.send(next_event.chain_result([Comp.Image.fromURL(image_url)]))
             self.pending_choices.pop(user_id, None)
             controller.stop()
 
@@ -354,9 +361,9 @@ class HWInfoPlugin(Star):
 
         conclusion = f"结论：{base_item.get('name')} 相当于 {target_items[0].get('name')}"
         image_url = await self._render_compare_image(base_item, target_items, conclusion=conclusion)
-        yield event.image_result(image_url)
+        yield event.chain_result([Comp.Image.fromURL(image_url)])
 
     @filter.command("显卡天梯图")
     async def gpu_rank(self, event: AstrMessageEvent):
         """发送显卡天梯图。"""
-        yield event.image_result(str(GPU_RANK_IMAGE))
+        yield event.chain_result(self._image_chain(GPU_RANK_IMAGE))
