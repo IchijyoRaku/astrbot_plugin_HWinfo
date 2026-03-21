@@ -347,8 +347,14 @@ class HWInfoPlugin(Star):
         text = event.message_str
         source_type, query = self._extract_type_and_query(text)
         target_type = "desktop" if source_type == "laptop" else "laptop"
-        source_candidates = [item for item in self.gpu_items if item.get("type") == source_type]
-        target_candidates = [item for item in self.gpu_items if item.get("type") == target_type and item.get("score")]
+        source_candidates = [
+            item for item in self.gpu_items
+            if item.get("type") == source_type and item.get("generation")
+        ]
+        target_candidates = [
+            item for item in self.gpu_items
+            if item.get("type") == target_type and item.get("score") and item.get("generation")
+        ]
         base_matches = self._fuzzy_search_items(source_candidates, query)
         if not base_matches:
             logger.info("显卡对比未找到基准型号，query=%s", query)
