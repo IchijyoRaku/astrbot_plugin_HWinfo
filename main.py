@@ -71,7 +71,7 @@ class HWInfoPlugin(Star):
 
     def _extract_model_core_and_suffix(self, text: str) -> tuple[str, str]:
         normalized = self._normalize_query_model(text)
-        match = re.search(r"(\d{3,5})([a-z]*)", normalized)
+        match = re.search(r"(\d{3,5})([a-z0-9]*)", normalized)
         if not match:
             return normalized, ""
         return match.group(1), match.group(2)
@@ -98,13 +98,14 @@ class HWInfoPlugin(Star):
 
         if suffix:
             if model.endswith(suffix):
-                score += 500
+                score += 700
             elif suffix in model:
-                score += 150
+                score += 120
             else:
-                score -= 300
+                score -= 600
+            score += len(suffix) * 40
         else:
-            if any(token in model for token in ["ti", "super"]):
+            if any(token in model for token in ["ti", "super", "x3d", "mobile"]):
                 score -= 120
 
         normalized_full_query = self._normalize_query_model(query)
@@ -136,9 +137,20 @@ class HWInfoPlugin(Star):
         if not scored:
             return []
         best_score = scored[0][0]
+        best_model = self._extract_strict_model(scored[0][1])
+        query_core, query_suffix = self._extract_model_core_and_suffix(query)
         threshold = max(50, best_score - 300)
         filtered = [item for score, item in scored if score >= threshold]
-        logger.info("候选筛选阈值=%s，筛选后数量=%s", threshold, len(filtered))
+        if query_suffix:
+            precise = []
+            for item in filtered:
+                model = self._extract_strict_model(item)
+                if query_core in model and model.endswith(query_suffix):
+                    precise.append(item)
+            if precise:
+                logger.info("检测到更精确后缀匹配，优先保留 suffix=%s，数量=%s", query_suffix, len(precise))
+                filtered = precise
+        logger.info("最佳候选模型=%s，筛选阈值=%s，筛选后数量=%s", best_model, threshold, len(filtered))
         return filtered
 
     def _find_cpu_multi_score(self, item: dict[str, Any]) -> Any:
