@@ -185,7 +185,6 @@ class HWInfoPlugin(Star):
                 ("系列", "series"),
                 ("型号", "name"),
                 ("类型", "type"),
-                ("代际", "generation"),
                 ("显存容量", "memory_size"),
                 ("显存类型", "memory_type"),
                 ("跑分", "score"),
@@ -251,8 +250,7 @@ class HWInfoPlugin(Star):
                 controller.stop()
                 return
             if not text.isdigit():
-                await next_event.send(next_event.plain_result("请输入数字序号。"))
-                logger.info("用户输入非数字，user_id=%s", user_id)
+                logger.info("用户输入非数字，忽略本次输入，user_id=%s", user_id)
                 return
             index = int(text) - 1
             candidates = self.pending_choices.get(user_id, {}).get("items", [])
